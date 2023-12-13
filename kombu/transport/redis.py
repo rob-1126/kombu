@@ -89,7 +89,7 @@ except ImportError:  # pragma: no cover
 
 
 logger = get_logger('kombu.transport.redis')
-crit, warn = logger.critical, logger.warn
+crit, warn, debug = logger.critical, logger.warn, logger.debug
 
 DEFAULT_PORT = 6379
 DEFAULT_DB = 0
@@ -1322,7 +1322,30 @@ class Transport(virtual.Transport):
                     loop.on_tick.remove(on_poll_start)
                 except KeyError:
                     pass
-        cycle._on_connection_disconnect = _on_disconnect
+
+        def _make_on_disconnect():
+            # redis also calls the disconnecton callback from __del__
+            # which is sometimes called implicitly after a new connection
+            # has been established. This causes the on_disconnect callback
+            # to then erroneously disconnect the new connection. We
+            # workaround this by debouncing the disconnect callback so that
+            # only the first disconnection request per socket is processed
+            # and subsequent requests are ignored.
+            # works around 
+            last_seen_connection_sock = None
+            nonlocal _on_disconnect
+            def debounced_on_disconnect(connection):
+                current_connection_sock = connection._sock
+                nonlocal last_seen_connection_sock
+                if current_connection_sock != last_seen_connection_sock:
+                    _on_disconnect(connection)
+                else:
+                    debug(f"Skipping duplicate on_disconnect for connection {id(connection)} {id(current_connection_sock)}.")
+            return debounced_on_disconnect
+
+        cycle._on_connection_disconnect = _make_on_disconnect()
+        #connection._on_connection_disconnect = _on_disconnect
+
 
         def on_poll_start():
             cycle_poll_start()
